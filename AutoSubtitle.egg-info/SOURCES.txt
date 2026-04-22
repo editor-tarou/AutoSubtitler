@@ -1,5 +1,0 @@
-build_exe.py
-AutoSubtitle.egg-info/PKG-INFO
-AutoSubtitle.egg-info/SOURCES.txt
-AutoSubtitle.egg-info/dependency_links.txt
-AutoSubtitle.egg-info/top_level.txt
