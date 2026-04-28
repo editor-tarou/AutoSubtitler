@@ -13,6 +13,13 @@ import threading
 import tkinter as tk
 from tkinter import filedialog, messagebox
 
+# drag-and-drop support — falls back gracefully if tkinterdnd2 isn't installed
+try:
+    from tkinterdnd2 import TkinterDnD, DND_FILES
+    _DND_AVAILABLE = True
+except ImportError:
+    _DND_AVAILABLE = False
+
 from .theme        import BG, SURFACE, SURFACE2, SURFACE3, BORDER, ACCENT, TEXT, MUTED, MUTED2, ERROR, SUCCESS, FUI, FMONO, FSM, FXSM, FBOLD, _ICON_B64
 from .paths        import AUTHOR
 from .presets      import load_presets, save_presets
@@ -23,7 +30,7 @@ from .tutorial     import TutorialOverlay
 from .preset_editor import PresetEditor
 
 
-class App(tk.Tk):
+class App(TkinterDnD.Tk if _DND_AVAILABLE else tk.Tk):
 
     def __init__(self):
         super().__init__()
@@ -40,12 +47,13 @@ class App(tk.Tk):
 
         self.title("AutoSubtitle")
         self.configure(bg=BG)
-        self.resizable(False, False)
-        self.geometry("620x800")
+        self.resizable(False, True)
+        self.geometry("620x940")
+        self.minsize(620, 860)
 
         splash.advance_to(0.20, "Loading interface…")
         self.file_path  = tk.StringVar(value="")
-        self.seg_style  = tk.StringVar(value=list(SEG_STYLES.keys())[1])
+        self.seg_style  = tk.StringVar(value="Balanced - 3-5 words")
         self.model_var  = tk.StringVar(value="medium")
         self.lang_var   = tk.StringVar(value="auto")
         self.format_var = tk.StringVar(value="SRT")
@@ -95,20 +103,28 @@ class App(tk.Tk):
 
         # File picker
         self._section("Audio / Video File")
-        drop = tk.Frame(self, bg=SURFACE, cursor="hand2",
+        self._drop_frame = tk.Frame(self, bg=SURFACE, cursor="hand2",
                         highlightthickness=1, highlightbackground=BORDER)
-        drop.pack(fill="x", padx=24, pady=(0, 16))
-        drop.bind("<Button-1>", lambda _e: self._browse())
-        drop.bind("<Enter>",    lambda _e: drop.config(highlightbackground=ACCENT))
-        drop.bind("<Leave>",    lambda _e: drop.config(highlightbackground=BORDER))
+        self._drop_frame.pack(fill="x", padx=24, pady=(0, 16))
+        self._drop_frame.bind("<Button-1>", lambda _e: self._browse())
+        self._drop_frame.bind("<Enter>",    lambda _e: self._drop_frame.config(highlightbackground=ACCENT))
+        self._drop_frame.bind("<Leave>",    lambda _e: self._drop_frame.config(highlightbackground=BORDER))
 
+        hint = "Click or drag & drop  *  mp3  mp4  wav  m4a  mov" if _DND_AVAILABLE else "Click to choose file  *  mp3  mp4  wav  m4a  mov"
         self._file_label = tk.Label(
-            drop,
-            text="Click to choose file  *  mp3  mp4  wav  m4a  mov",
+            self._drop_frame,
+            text=hint,
             font=FUI, bg=SURFACE, fg=MUTED, pady=22, cursor="hand2",
         )
         self._file_label.pack()
         self._file_label.bind("<Button-1>", lambda _e: self._browse())
+
+        # wire up drag-and-drop if tkinterdnd2 is available
+        if _DND_AVAILABLE:
+            self._drop_frame.drop_target_register(DND_FILES)
+            self._drop_frame.dnd_bind("<<Drop>>", self._on_drop)
+            self._file_label.drop_target_register(DND_FILES)
+            self._file_label.dnd_bind("<<Drop>>", self._on_drop)
 
         self._div()
 
@@ -191,16 +207,23 @@ class App(tk.Tk):
         )
         self._btn.pack(fill="x", padx=24, pady=(0, 28))
 
-        # Log panel
+        # Log panel — made taller + scrollable so you can actually read transcription output
         self._section("Log")
         lf = tk.Frame(self, bg=SURFACE2, highlightthickness=1, highlightbackground=BORDER)
-        lf.pack(fill="x", padx=24, pady=(0, 24))
+        lf.pack(fill="both", expand=True, padx=24, pady=(0, 24))
+
+        sb = tk.Scrollbar(lf, orient="vertical", bg=SURFACE2, troughcolor=BG,
+                          relief="flat", bd=0, width=6, highlightthickness=0)
+        sb.pack(side="right", fill="y")
+
         self._log = tk.Text(
-            lf, height=7, font=FMONO, bg=SURFACE2, fg=TEXT,
+            lf, height=14, font=FMONO, bg=SURFACE2, fg=TEXT,
             insertbackground=ACCENT, relief="flat", bd=0,
             padx=12, pady=10, state="disabled", wrap="word",
+            yscrollcommand=sb.set,
         )
-        self._log.pack(fill="x")
+        self._log.pack(side="left", fill="both", expand=True)
+        sb.config(command=self._log.yview)
         self._log.tag_config("accent",  foreground=ACCENT)
         self._log.tag_config("success", foreground=SUCCESS)
         self._log.tag_config("error",   foreground=ERROR)
@@ -303,6 +326,26 @@ class App(tk.Tk):
 
     # ── file picker & log ─────────────────────────────────────────────────────
 
+    def _on_drop(self, event) -> None:
+        # tkinterdnd2 wraps paths in braces if they have spaces — strip them
+        raw = event.data.strip()
+        if raw.startswith("{") and raw.endswith("}"):
+            raw = raw[1:-1]
+        path = raw.split("} {")[0]   # take first file if multiple dropped
+        path = path.strip("{}")
+
+        valid_ext = {".mp3", ".mp4", ".wav", ".m4a", ".mov", ".aac", ".flac", ".ogg", ".mkv", ".webm"}
+        if os.path.isfile(path) and os.path.splitext(path)[1].lower() in valid_ext:
+            self.file_path.set(path)
+            self._file_label.config(text=f"  {os.path.basename(path)}", fg=TEXT)
+            self._drop_frame.config(highlightbackground=ACCENT)
+            self._log_clear()
+            self._log_write(f"File: {os.path.basename(path)}\n", "muted")
+        else:
+            self._drop_frame.config(highlightbackground=ERROR)
+            self.after(1000, lambda: self._drop_frame.config(highlightbackground=BORDER))
+            self._log_write("Unsupported file type. Drop an mp3, mp4, wav, m4a, mov etc.\n", "error")
+
     def _browse(self) -> None:
         path = filedialog.askopenfilename(
             title="Choose audio or video file",
@@ -362,12 +405,17 @@ class App(tk.Tk):
         lang     = self.lang_var.get()
         fmt      = self.format_var.get()
 
-        threading.Thread(
-            target=run_transcription,
-            args=(path, mdl, lang, seg_cfg,
-                  self._log_write, self._finish, preset, fmt),
-            daemon=True,
-        ).start()
+        def _safe_run():
+            try:
+                run_transcription(path, mdl, lang, seg_cfg,
+                                  self._log_write, self._finish, preset, fmt)
+            except Exception as exc:
+                import traceback
+                self._log_write(f"\nCrash: {exc}\n", "error")
+                self._log_write(traceback.format_exc(), "muted")
+                self._finish()
+
+        threading.Thread(target=_safe_run, daemon=True).start()
 
     def _finish(self) -> None:
         self.running = False
