@@ -9,6 +9,7 @@ than I'd like but it works and I'm scared to touch the preset wiring again.
 """
 
 import os
+import json
 import threading
 import tkinter as tk
 from tkinter import filedialog, messagebox
@@ -23,11 +24,20 @@ except ImportError:
 from .theme        import BG, SURFACE, SURFACE2, SURFACE3, BORDER, ACCENT, TEXT, MUTED, MUTED2, ERROR, SUCCESS, FUI, FMONO, FSM, FXSM, FBOLD, _ICON_B64
 from .paths        import AUTHOR
 from .presets      import load_presets, save_presets
+from .edition      import IS_PRO, EDITION, reload_edition
+from .license      import validate_key, save_key, load_saved_key, remove_key
 from .transcribe   import SEG_STYLES, MODELS, LANGUAGES, check_dependencies, run_transcription
 from .widgets      import get_system_fonts, style_optionmenu
 from .splash       import SplashScreen
 from .tutorial     import TutorialOverlay
 from .preset_editor import PresetEditor
+from .sounds        import play_complete, play_error, play_activate, play_startup, prewarm
+
+# First-run flag — stored next to presets/license data
+from .paths import AUTHOR as _AUTHOR
+import pathlib
+_DATA_DIR   = pathlib.Path(os.environ.get("APPDATA", "~")).expanduser() / "AutoSubtitle"
+_FIRST_RUN  = _DATA_DIR / ".first_run_done"
 
 
 class App(TkinterDnD.Tk if _DND_AVAILABLE else tk.Tk):
@@ -45,7 +55,7 @@ class App(TkinterDnD.Tk if _DND_AVAILABLE else tk.Tk):
         except Exception:
             pass
 
-        self.title("AutoSubtitle")
+        self.title("AutoSubtitle" + (" Pro" if IS_PRO else " Lite"))
         self.configure(bg=BG)
         self.resizable(False, True)
         self.geometry("620x940")
@@ -56,7 +66,9 @@ class App(TkinterDnD.Tk if _DND_AVAILABLE else tk.Tk):
         self.seg_style  = tk.StringVar(value="Balanced - 3-5 words")
         self.model_var  = tk.StringVar(value="medium")
         self.lang_var   = tk.StringVar(value="auto")
-        self.format_var = tk.StringVar(value="SRT")
+        self.nle_var    = tk.StringVar(value="Premiere")
+        self.fmt_premiere = tk.StringVar(value="SRT")
+        self.fmt_resolve  = tk.StringVar(value="ASS" if IS_PRO else "SRT")
         self.preset_var = tk.StringVar()
         self.running    = False
 
@@ -74,7 +86,17 @@ class App(TkinterDnD.Tk if _DND_AVAILABLE else tk.Tk):
         self._check_deps()
 
         splash.advance_to(1.00, "Ready!")
-        self.after(380, lambda: (splash.close(), self.deiconify()))
+        self.after(380, lambda: (splash.close(), self.deiconify(), play_startup()))
+        prewarm()  # build all sounds in background so first play is instant
+
+        # Auto-launch tutorial on first run, then never again
+        if not _FIRST_RUN.exists():
+            try:
+                _DATA_DIR.mkdir(parents=True, exist_ok=True)
+                _FIRST_RUN.touch()
+            except OSError:
+                pass
+            self.after(900, lambda: TutorialOverlay(self))
 
     # ── UI construction ───────────────────────────────────────────────────────
 
@@ -86,6 +108,11 @@ class App(TkinterDnD.Tk if _DND_AVAILABLE else tk.Tk):
                  bg=BG, fg=TEXT).pack(side="left")
         tk.Label(hdr, text=" *", font=("Segoe UI", 18, "bold"),
                  bg=BG, fg=ACCENT).pack(side="left")
+        # edition badge
+        badge_text  = "  PRO" if IS_PRO else "  LITE"
+        badge_color = ACCENT if IS_PRO else MUTED
+        tk.Label(hdr, text=badge_text, font=("Segoe UI", 9, "bold"),
+                 bg=BG, fg=badge_color).pack(side="left", padx=(2, 0))
         tk.Button(
             hdr, text="?  Tutorial", font=FSM,
             bg=SURFACE2, fg=ACCENT,
@@ -94,7 +121,18 @@ class App(TkinterDnD.Tk if _DND_AVAILABLE else tk.Tk):
             command=lambda: TutorialOverlay(self),
         ).pack(side="right")
 
-        tk.Label(self, text="Smart subtitles for Adobe Premiere Pro",
+        # License button — shows "Unlock Pro" on Lite, "License" on Pro
+        _lic_text  = "🔑  License" if IS_PRO else "🔑  Unlock Pro"
+        _lic_fg    = MUTED if IS_PRO else ACCENT
+        tk.Button(
+            hdr, text=_lic_text, font=FSM,
+            bg=SURFACE2, fg=_lic_fg,
+            activebackground=SURFACE3, activeforeground=_lic_fg,
+            relief="flat", bd=0, padx=10, pady=4, cursor="hand2",
+            command=lambda: LicenseDialog(self),
+        ).pack(side="right", padx=(0, 6))
+
+        tk.Label(self, text="Smart subtitles for your editing flow",
                  font=FSM, bg=BG, fg=MUTED).pack(anchor="w", padx=24, pady=(4, 2))
         tk.Label(self, text=AUTHOR,
                  font=FXSM, bg=BG, fg=MUTED2).pack(anchor="w", padx=24, pady=(0, 20))
@@ -122,9 +160,13 @@ class App(TkinterDnD.Tk if _DND_AVAILABLE else tk.Tk):
         # wire up drag-and-drop if tkinterdnd2 is available
         if _DND_AVAILABLE:
             self._drop_frame.drop_target_register(DND_FILES)
-            self._drop_frame.dnd_bind("<<Drop>>", self._on_drop)
+            self._drop_frame.dnd_bind("<<Drop>>",         self._on_drop)
+            self._drop_frame.dnd_bind("<<DragEnter>>",    self._on_drag_enter)
+            self._drop_frame.dnd_bind("<<DragLeave>>",    self._on_drag_leave)
             self._file_label.drop_target_register(DND_FILES)
-            self._file_label.dnd_bind("<<Drop>>", self._on_drop)
+            self._file_label.dnd_bind("<<Drop>>",         self._on_drop)
+            self._file_label.dnd_bind("<<DragEnter>>",    self._on_drag_enter)
+            self._file_label.dnd_bind("<<DragLeave>>",    self._on_drag_leave)
 
         self._div()
 
@@ -140,17 +182,30 @@ class App(TkinterDnD.Tk if _DND_AVAILABLE else tk.Tk):
 
         btns = tk.Frame(prow, bg=BG)
         btns.grid(row=0, column=1)
-        tk.Button(btns, text="New", font=FSM, bg=SURFACE2, fg=TEXT,
+
+        _btn_state = "normal" if IS_PRO else "disabled"
+        _btn_fg    = TEXT if IS_PRO else MUTED
+
+        tk.Button(btns, text="New", font=FSM, bg=SURFACE2, fg=_btn_fg,
                   activebackground=BORDER, relief="flat", bd=0, padx=12, pady=6,
-                  cursor="hand2", command=self._new_preset).pack(side="left", padx=(0, 4))
-        self._edit_btn = tk.Button(btns, text="Edit", font=FSM, bg=SURFACE2, fg=TEXT,
+                  cursor="hand2" if IS_PRO else "arrow",
+                  state=_btn_state,
+                  command=self._new_preset).pack(side="left", padx=(0, 4))
+        self._edit_btn = tk.Button(btns, text="Edit", font=FSM, bg=SURFACE2, fg=_btn_fg,
                   activebackground=BORDER, relief="flat", bd=0, padx=12, pady=6,
-                  cursor="hand2", command=self._edit_preset)
+                  cursor="hand2" if IS_PRO else "arrow",
+                  state=_btn_state,
+                  command=self._edit_preset)
         self._edit_btn.pack(side="left", padx=(0, 4))
-        self._del_btn = tk.Button(btns, text="Delete", font=FSM, bg=SURFACE2, fg=ERROR,
+        self._del_btn = tk.Button(btns, text="Delete", font=FSM, bg=SURFACE2, fg=MUTED if not IS_PRO else ERROR,
                   activebackground=BORDER, relief="flat", bd=0, padx=12, pady=6,
-                  cursor="hand2", command=self._delete_preset)
+                  cursor="hand2" if IS_PRO else "arrow",
+                  state=_btn_state,
+                  command=self._delete_preset)
         self._del_btn.pack(side="left")
+
+        if not IS_PRO:
+            tk.Label(prow, text="  ★ Pro", font=FXSM, bg=BG, fg=MUTED2).grid(row=0, column=2, padx=(6, 0))
 
         self._preview = tk.Label(self, text="", font=FSM, bg=SURFACE2, fg=MUTED,
                                   anchor="w", pady=8, padx=12)
@@ -185,15 +240,21 @@ class App(TkinterDnD.Tk if _DND_AVAILABLE else tk.Tk):
         ff = tk.Frame(bot_row, bg=BG)
         ff.grid(row=0, column=1, sticky="n")
         self._fmt_frame = ff
-        tk.Label(ff, text="Format", font=FSM, bg=BG, fg=MUTED).pack(anchor="w")
-        fmt_row = tk.Frame(ff, bg=BG)
-        fmt_row.pack(anchor="w", pady=(4, 0))
-        for fmt in ("SRT", "VTT"):
+        tk.Label(ff, text="Export for", font=FSM, bg=BG, fg=MUTED).pack(anchor="w")
+        nle_row = tk.Frame(ff, bg=BG)
+        nle_row.pack(anchor="w", pady=(4, 0))
+        for nle in ("Premiere", "Resolve"):
             tk.Radiobutton(
-                fmt_row, text=fmt, variable=self.format_var, value=fmt,
+                nle_row, text=nle, variable=self.nle_var, value=nle,
                 font=FUI, bg=BG, fg=TEXT, selectcolor=SURFACE2,
                 activebackground=BG, activeforeground=TEXT,
+                command=self._update_nle_panel,
             ).pack(side="left", padx=(0, 10))
+
+        # sub-panel that swaps depending on which NLE is selected
+        self._nle_panel = tk.Frame(ff, bg=BG)
+        self._nle_panel.pack(anchor="w", pady=(6, 0))
+        self._update_nle_panel()
 
         self._div()
 
@@ -205,7 +266,30 @@ class App(TkinterDnD.Tk if _DND_AVAILABLE else tk.Tk):
             relief="flat", bd=0, pady=16, cursor="hand2",
             command=self._run,
         )
-        self._btn.pack(fill="x", padx=24, pady=(0, 28))
+        self._btn.pack(fill="x", padx=24, pady=(0, 8))
+
+        # Progress bar — hidden until a run starts
+        self._prog_frame = tk.Frame(self, bg=BG, height=24)
+        self._prog_frame.pack(fill="x", padx=24, pady=(0, 12))
+        self._prog_frame.pack_propagate(False)
+
+        self._prog_track = tk.Frame(self._prog_frame, bg=SURFACE2,
+                                    highlightthickness=1, highlightbackground=BORDER,
+                                    height=6)
+        self._prog_track.place(x=0, y=0, relwidth=1)
+        self._prog_track.pack_propagate(False)
+
+        self._prog_fill = tk.Frame(self._prog_track, bg=ACCENT, height=6)
+        self._prog_fill.place(x=0, y=0, relheight=1, relwidth=0)
+
+        self._prog_label = tk.Label(self._prog_frame, text="", font=FXSM,
+                                     bg=BG, fg=MUTED, anchor="w")
+        self._prog_label.place(x=0, y=10, relwidth=1)
+
+        # start invisible
+        self._prog_frame.config(height=1)
+        for w in (self._prog_track, self._prog_label):
+            w.place_forget()
 
         # Log panel — made taller + scrollable so you can actually read transcription output
         self._section("Log")
@@ -326,6 +410,62 @@ class App(TkinterDnD.Tk if _DND_AVAILABLE else tk.Tk):
 
     # ── file picker & log ─────────────────────────────────────────────────────
 
+    def _update_nle_panel(self) -> None:
+        # Lite:  Premiere→SRT only  |  Resolve→SRT only
+        # Pro:   Premiere→SRT/VTT   |  Resolve→SRT/ASS
+        for w in self._nle_panel.winfo_children():
+            w.destroy()
+
+        nle = self.nle_var.get()
+
+        if nle == "Premiere":
+            if IS_PRO:
+                tk.Label(self._nle_panel, text="Format", font=FXSM, bg=BG, fg=MUTED2).pack(anchor="w")
+                row = tk.Frame(self._nle_panel, bg=BG)
+                row.pack(anchor="w")
+                for fmt in ("SRT", "VTT"):
+                    tk.Radiobutton(row, text=fmt, variable=self.fmt_premiere, value=fmt,
+                                   font=FXSM, bg=BG, fg=MUTED, selectcolor=SURFACE2,
+                                   activebackground=BG, activeforeground=TEXT,
+                    ).pack(side="left", padx=(0, 8))
+            else:
+                # Lite — SRT only, no VTT
+                self.fmt_premiere.set("SRT")
+                tk.Label(self._nle_panel, text="Format: SRT", font=FXSM,
+                         bg=BG, fg=MUTED2).pack(anchor="w")
+        else:
+            # DaVinci Resolve
+            if IS_PRO:
+                tk.Label(self._nle_panel, text="Format", font=FXSM, bg=BG, fg=MUTED2).pack(anchor="w")
+                row = tk.Frame(self._nle_panel, bg=BG)
+                row.pack(anchor="w")
+                for fmt in ("SRT", "ASS"):
+                    lbl = fmt if fmt == "SRT" else "ASS  (full styling)"
+                    tk.Radiobutton(row, text=lbl, variable=self.fmt_resolve, value=fmt,
+                                   font=FXSM, bg=BG, fg=MUTED, selectcolor=SURFACE2,
+                                   activebackground=BG, activeforeground=TEXT,
+                    ).pack(side="left", padx=(0, 8))
+            else:
+                # Lite — SRT only, ASS is Pro
+                self.fmt_resolve.set("SRT")
+                tk.Label(self._nle_panel, text="Format: SRT   ★ ASS requires Pro",
+                         font=FXSM, bg=BG, fg=MUTED2).pack(anchor="w")
+
+    def _on_drag_enter(self, event) -> None:
+        self._drop_frame.config(bg=SURFACE2, highlightbackground=ACCENT)
+        self._file_label.config(bg=SURFACE2, fg=ACCENT,
+                                 text="  Drop it!")
+
+    def _on_drag_leave(self, event) -> None:
+        self._drop_frame.config(bg=SURFACE, highlightbackground=BORDER)
+        # restore label: if a file is loaded show its name, else show the hint
+        if self.file_path.get():
+            self._file_label.config(bg=SURFACE, fg=TEXT,
+                                     text=f"  {os.path.basename(self.file_path.get())}")
+        else:
+            hint = "Click or drag & drop  *  mp3  mp4  wav  m4a  mov" if _DND_AVAILABLE else "Click to choose file  *  mp3  mp4  wav  m4a  mov"
+            self._file_label.config(bg=SURFACE, fg=MUTED, text=hint)
+
     def _on_drop(self, event) -> None:
         # tkinterdnd2 wraps paths in braces if they have spaces — strip them
         raw = event.data.strip()
@@ -337,13 +477,14 @@ class App(TkinterDnD.Tk if _DND_AVAILABLE else tk.Tk):
         valid_ext = {".mp3", ".mp4", ".wav", ".m4a", ".mov", ".aac", ".flac", ".ogg", ".mkv", ".webm"}
         if os.path.isfile(path) and os.path.splitext(path)[1].lower() in valid_ext:
             self.file_path.set(path)
-            self._file_label.config(text=f"  {os.path.basename(path)}", fg=TEXT)
-            self._drop_frame.config(highlightbackground=ACCENT)
+            self._drop_frame.config(bg=SURFACE, highlightbackground=ACCENT)
+            self._file_label.config(bg=SURFACE, text=f"  {os.path.basename(path)}", fg=TEXT)
             self._log_clear()
             self._log_write(f"File: {os.path.basename(path)}\n", "muted")
         else:
-            self._drop_frame.config(highlightbackground=ERROR)
+            self._drop_frame.config(bg=SURFACE, highlightbackground=ERROR)
             self.after(1000, lambda: self._drop_frame.config(highlightbackground=BORDER))
+            self._file_label.config(bg=SURFACE)
             self._log_write("Unsupported file type. Drop an mp3, mp4, wav, m4a, mov etc.\n", "error")
 
     def _browse(self) -> None:
@@ -397,28 +538,219 @@ class App(TkinterDnD.Tk if _DND_AVAILABLE else tk.Tk):
             return
 
         self.running = True
+        self._indet_job = None
         self._btn.config(state="disabled", text="Working...", bg=BORDER, fg=MUTED)
         self._log_clear()
+        self._show_progress(True)
+        self._update_progress(0.0, "Starting…")
 
         seg_cfg  = SEG_STYLES[self.seg_style.get()]
         mdl      = self.model_var.get()
         lang     = self.lang_var.get()
-        fmt      = self.format_var.get()
+        nle      = self.nle_var.get()
+        fmt      = self.fmt_premiere.get() if nle == "Premiere" else self.fmt_resolve.get()
 
         def _safe_run():
             try:
                 run_transcription(path, mdl, lang, seg_cfg,
-                                  self._log_write, self._finish, preset, fmt)
+                                  self._log_write, self._finish, preset, nle, fmt,
+                                  on_progress=lambda f, lbl: self.after(0, self._update_progress, f, lbl),
+                                  on_transcribe_start=lambda: self.after(0, self._start_indeterminate, "Transcribing…"))
             except Exception as exc:
                 import traceback
                 self._log_write(f"\nCrash: {exc}\n", "error")
                 self._log_write(traceback.format_exc(), "muted")
+                play_error()
                 self._finish()
 
         threading.Thread(target=_safe_run, daemon=True).start()
 
+    def _show_progress(self, visible: bool) -> None:
+        if visible:
+            self._prog_frame.config(height=24)
+            self._prog_track.place(x=0, y=0, relwidth=1)
+            self._prog_label.place(x=0, y=10, relwidth=1)
+        else:
+            self._stop_indeterminate()
+            self._prog_frame.config(height=1)
+            self._prog_track.place_forget()
+            self._prog_label.place_forget()
+
+    def _update_progress(self, frac: float, label: str) -> None:
+        """Show a real deterministic fill. Stops any indeterminate animation."""
+        self._stop_indeterminate()
+        self._prog_fill.place(x=0, relheight=1, relwidth=max(0.0, min(1.0, frac)))
+        self._prog_label.config(text=label)
+
+    def _start_indeterminate(self, label: str) -> None:
+        """
+        Scanning pulse: a fixed-width block slides back and forth.
+        Honest — makes no claim about how much work is done.
+        """
+        self._stop_indeterminate()
+        self._prog_label.config(text=label)
+        BLOCK = 0.28   # width of the travelling block as a fraction of the track
+        STEP  = 0.012
+        pos   = [0.0]
+        dir_  = [1]
+
+        def _tick():
+            pos[0] += STEP * dir_[0]
+            if pos[0] + BLOCK >= 1.0:
+                pos[0] = 1.0 - BLOCK
+                dir_[0] = -1
+            elif pos[0] <= 0.0:
+                pos[0] = 0.0
+                dir_[0] = 1
+            self._prog_track.update_idletasks()
+            w = self._prog_track.winfo_width()
+            if w > 1:
+                self._prog_fill.place(x=int(pos[0] * w), relheight=1,
+                                      width=int(BLOCK * w))
+            self._indet_job = self.after(30, _tick)
+
+        self._indet_job = self.after(0, _tick)
+
+    def _stop_indeterminate(self) -> None:
+        if self._indet_job:
+            self.after_cancel(self._indet_job)
+            self._indet_job = None
+
     def _finish(self) -> None:
         self.running = False
-        # restore full button weight — wants to feel rewarding to click again
+        play_complete()
+        self._update_progress(1.0, "Done!")
+        self.after(1800, lambda: self._show_progress(False))
         self._btn.config(state="normal", text="Generate Subtitles  →",
                          bg=ACCENT, fg="#0f0f0f")
+
+# ── License / activation dialog ───────────────────────────────────────────────
+
+class LicenseDialog(tk.Toplevel):
+    """
+    Modal dialog for entering a Pro license key.
+
+    On a valid key: saves it, reloads the edition flags, and prompts
+    the user to restart so the full UI re-initialises in Pro mode.
+    On an invalid key: shakes the entry field and shows an inline error.
+    """
+
+    def __init__(self, parent: tk.Tk):
+        super().__init__(parent)
+        self.parent   = parent
+        self.title("Unlock AutoSubtitle Pro")
+        self.configure(bg=BG)
+        self.resizable(False, False)
+        self.grab_set()          # modal
+
+        # ── layout ──────────────────────────────────────────────────────
+        pad = {"padx": 28, "pady": 0}
+
+        tk.Label(self, text="Enter your license key", font=("Segoe UI", 13, "bold"),
+                 bg=BG, fg=TEXT).pack(anchor="w", padx=28, pady=(24, 4))
+        tk.Label(self, text="Format: XXXX-XXXX-XXXX-XXXX",
+                 font=FXSM, bg=BG, fg=MUTED).pack(anchor="w", **pad)
+
+        self._entry_var = tk.StringVar()
+        self._entry = tk.Entry(
+            self, textvariable=self._entry_var,
+            font=("Segoe UI Mono", 13), bg=SURFACE2, fg=TEXT,
+            insertbackground=ACCENT, relief="flat", bd=0,
+            highlightthickness=1, highlightbackground=BORDER,
+            width=22,
+        )
+        self._entry.pack(padx=28, pady=(10, 0), ipady=8, fill="x")
+        self._entry.bind("<Return>", lambda _: self._activate())
+
+        # auto-insert dashes as the user types (XXXX-XXXX-XXXX-XXXX)
+        self._entry_var.trace_add("write", self._auto_dash)
+        self._typing = False
+
+        self._status = tk.Label(self, text="", font=FSM, bg=BG, fg=ERROR)
+        self._status.pack(anchor="w", padx=28, pady=(6, 0))
+
+        btn_row = tk.Frame(self, bg=BG)
+        btn_row.pack(fill="x", padx=28, pady=(16, 24))
+        tk.Button(btn_row, text="Cancel", font=FSM, bg=SURFACE2, fg=MUTED,
+                  activebackground=BORDER, relief="flat", bd=0,
+                  padx=14, pady=8, cursor="hand2",
+                  command=self.destroy).pack(side="right", padx=(8, 0))
+        tk.Button(btn_row, text="Activate  →", font=FSM, bg=ACCENT, fg="#0f0f0f",
+                  activebackground="#d4eb2a", activeforeground="#0f0f0f",
+                  relief="flat", bd=0,
+                  padx=14, pady=8, cursor="hand2",
+                  command=self._activate).pack(side="right")
+
+        # If a key is already saved (but invalid?), prefill it
+        saved = load_saved_key()
+        if saved:
+            self._entry_var.set(saved)
+            self._entry.icursor("end")
+
+        # deactivate button at the bottom if already activated
+        if IS_PRO:
+            tk.Button(btn_row, text="Deactivate", font=FSM, bg=SURFACE2, fg=ERROR,
+                      activebackground=BORDER, relief="flat", bd=0,
+                      padx=14, pady=8, cursor="hand2",
+                      command=self._deactivate).pack(side="left")
+
+        self.update_idletasks()
+        # centre over parent
+        pw = parent.winfo_x(); ph = parent.winfo_y()
+        pw2 = parent.winfo_width(); ph2 = parent.winfo_height()
+        w = self.winfo_reqwidth(); h = self.winfo_reqheight()
+        self.geometry(f"+{pw + pw2//2 - w//2}+{ph + ph2//2 - h//2}")
+        self._entry.focus_set()
+
+    # ── auto-dash ──────────────────────────────────────────────────────
+    def _auto_dash(self, *_):
+        if self._typing:
+            return
+        self._typing = True
+        raw = self._entry_var.get().upper().replace("-", "").replace(" ", "")
+        raw = "".join(c for c in raw if c in "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567")
+        raw = raw[:16]
+        parts = [raw[i:i+4] for i in range(0, len(raw), 4)]
+        formatted = "-".join(parts)
+        self._entry_var.set(formatted)
+        self._entry.icursor("end")
+        self._typing = False
+
+    # ── activate ───────────────────────────────────────────────────────
+    def _activate(self):
+        key = self._entry_var.get().strip()
+        if not validate_key(key):
+            self._status.config(text="Invalid key — please check and try again.", fg=ERROR)
+            # shake the entry to give tactile feedback
+            x0 = self._entry.winfo_x()
+            for dx in (6, -6, 4, -4, 2, -2, 0):
+                self._entry.place(x=x0 + dx)
+                self.update()
+                self.after(30)
+            self._entry.pack(padx=28, pady=(10, 0), ipady=8, fill="x")
+            return
+
+        if not save_key(key):
+            self._status.config(text="Could not save key — check folder permissions.", fg=ERROR)
+            return
+
+        reload_edition()
+        play_activate()
+        self.destroy()
+        messagebox.showinfo(
+            "Pro Activated!",
+            "Your license key is valid.\n\n"
+            "Please restart AutoSubtitle to enable all Pro features.",
+            parent=self.parent,
+        )
+
+    # ── deactivate ─────────────────────────────────────────────────────
+    def _deactivate(self):
+        if messagebox.askyesno("Deactivate", "Remove your Pro license from this machine?",
+                                parent=self):
+            remove_key()
+            reload_edition()
+            self.destroy()
+            messagebox.showinfo("Deactivated",
+                                "License removed. Restart AutoSubtitle to revert to Lite.",
+                                parent=self.parent)

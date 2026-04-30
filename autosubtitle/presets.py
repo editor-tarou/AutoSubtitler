@@ -1,14 +1,3 @@
-"""
-presets.py — preset data model, defaults, and load/save helpers.
-
-A preset is just a plain dict. PRESET_DEFAULTS defines every key a preset
-must have (and their fallback values), so older saved presets that are missing
-a newer field will still work after an upgrade.
-
-Added letter_spacing and line_height late — not all Premiere versions respect
-them via SRT anyway, but useful for the preview at minimum.
-"""
-
 import json
 
 from .paths import PRESETS_FILE

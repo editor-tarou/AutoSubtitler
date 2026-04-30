@@ -161,20 +161,26 @@ def run_transcription(
     model_id: str,
     language: str,
     seg_cfg: dict,
-    on_log,       # callable(str, tag: str | None)
-    on_done,      # callable()
+    on_log,        # callable(str, tag: str | None)
+    on_done,       # callable()
     preset: dict,
-    fmt: str,
+    nle: str,      # "Premiere" or "Resolve"
+    fmt: str = "SRT",   # Premiere: "SRT" or "VTT" | Resolve: "SRT" (Lite) or "ASS" (Pro)
+    on_progress=None,         # callable(float 0–1, str label) | None
+    on_transcribe_start=None, # callable() | None  — fired just before model.transcribe()
 ) -> None:
     """
-    Transcribe *path* using stable-whisper and write an SRT or VTT file.
+    Transcribe *path* using stable-whisper and write the chosen subtitle format.
 
     Designed to be called from a daemon thread — all log output goes through
     `on_log(text, tag)` so the GUI can display it without blocking.
     `on_done()` is called when finished (even on error).
     """
-    # These imports are intentionally late — they are slow and we don't want
-    # them running at startup before the splash screen is shown.
+    def _prog(frac: float, label: str) -> None:
+        if on_progress:
+            on_progress(frac, label)
+
+    _prog(0.0, "Starting…")
 
     # When running as a PyInstaller bundle, torch/lib is unpacked next to the
     # exe. We add it to PATH so CUDA DLLs (cublas, cudnn etc.) are found.
@@ -200,9 +206,16 @@ def run_transcription(
 
     import stable_whisper
 
-    from .subtitle_export import cards_to_srt, cards_to_vtt
+    from .subtitle_export import cards_to_srt, cards_to_vtt, cards_to_ass
 
-    ext      = ".srt" if fmt == "SRT" else ".vtt"
+    # Premiere → SRT or VTT depending on user choice
+    # Resolve  → SRT (basic, no styling) or ASS (full preset: font, colour, outline, position)
+    if nle == "Resolve" and fmt == "ASS":
+        ext = ".ass"
+    elif fmt == "VTT":
+        ext = ".vtt"
+    else:
+        ext = ".srt"
 
     # Save next to the source file. If that directory isn't writable (e.g. a
     # network drive or a protected folder) fall back to the user's Desktop.
@@ -224,11 +237,15 @@ def run_transcription(
 
     try:
         on_log(f"Loading Whisper '{model_id}'...\n", "muted")
+        _prog(0.10, f"Loading {model_id} model…")
         # NOTE: large model on CPU takes like 3x realtime, warn user?
         # had a crash once with large+cuda on my 3050 with a 20min clip — not reproducible
         model = stable_whisper.load_model(model_id, device=device)
 
         on_log("Transcribing with precise timing...\n", "muted")
+        _prog(0.25, "Transcribing audio…")
+        if on_transcribe_start:
+            on_transcribe_start()
         opts: dict = {"word_timestamps": True, "regroup": False}
         if language != "auto":
             opts["language"] = language
@@ -268,6 +285,7 @@ def run_transcription(
 
         detected = result.language if hasattr(result, "language") else "unknown"
         on_log(f"Language: {detected}\n", "muted")
+        _prog(0.80, "Segmenting words…")
 
         all_words = []
         for seg in result.segments:
@@ -284,11 +302,14 @@ def run_transcription(
         on_log(f"Words found: {len(all_words)}\n", "muted")
         cards = segment_words(all_words, seg_cfg)
         on_log(f"Cards: {len(cards)}\n", "muted")
+        _prog(0.92, "Writing subtitle file…")
 
-        if fmt == "SRT":
-            content = cards_to_srt(cards, preset)
-        else:
+        if nle == "Resolve" and fmt == "ASS":
+            content = cards_to_ass(cards, preset)
+        elif fmt == "VTT":
             content = cards_to_vtt(cards, preset)
+        else:
+            content = cards_to_srt(cards, preset)
 
         try:
             with open(out_path, "w", encoding="utf-8") as f:
@@ -301,22 +322,34 @@ def run_transcription(
 
         on_log(f"\n✓ Done!  {len(cards)} caption cards\n", "success")
         on_log(f"  Saved: {out_path}\n", "accent")
+        _prog(1.0, "Done!")
 
-        # SRT is more reliable for Premiere — VTT position cues are supposed to work
-        # but Premiere interprets them inconsistently depending on version
-        if fmt == "SRT":
+        if nle == "Resolve" and fmt == "ASS":
             on_log(
-                "\nIn Premiere: File > Import, then drag the .srt\n"
-                "onto a caption track. Right-click the track >\n"
-                "Convert to Graphics to apply a .mogrt style.\n",
+                "\nIn Resolve: File > Import > Subtitles, select the .ass file.\n"
+                "Font, colour, outline and position from your preset\n"
+                "are all embedded — should look right immediately.\n",
+                "muted",
+            )
+        elif nle == "Resolve":
+            on_log(
+                "\nIn Resolve: File > Import > Subtitles, select the .srt file.\n"
+                "Note: SRT carries no styling — use the Inspector panel in Resolve\n"
+                "to adjust font and colour after import.\n"
+                "Upgrade to Pro for .ass export with full preset styling.\n",
+                "muted",
+            )
+        elif fmt == "VTT":
+            on_log(
+                "\nIn Premiere: File > Import, then drag the .vtt\n"
+                "onto a caption track. Position cues are embedded.\n",
                 "muted",
             )
         else:
             on_log(
-                "\nIn Premiere: File > Import, then drag the .vtt\n"
-                "onto a caption track. Position cues are embedded.\n"
-                "Right-click the track > Convert to Graphics\n"
-                "to apply a .mogrt style.\n",
+                "\nIn Premiere: File > Import, then drag the .srt\n"
+                "onto a caption track. Right-click the track >\n"
+                "Convert to Graphics to apply a .mogrt style.\n",
                 "muted",
             )
 

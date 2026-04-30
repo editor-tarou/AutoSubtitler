@@ -1,8 +1,3 @@
-"""
-paths.py — resolves the correct user-data directory whether the app is running
-from source or from a PyInstaller bundle, and exposes the presets file path.
-"""
-
 import os
 import sys
 from pathlib import Path

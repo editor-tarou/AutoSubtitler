@@ -1,12 +1,3 @@
-"""
-tutorial.py — the interactive walkthrough overlay that highlights UI widgets
-one by one and explains what they do.
-
-The overlay is a borderless Toplevel that sits exactly over the main window.
-On Windows, a transparent colour key is used to punch a "spotlight" hole
-through the dark overlay so the highlighted widget is visible underneath.
-"""
-
 import math
 import tkinter as tk
 
@@ -113,9 +104,10 @@ class TutorialOverlay(tk.Toplevel):
             },
             {
                 "w":     lambda: a._fmt_frame,
-                "title": "📄  Output Format",
-                "body":  "SRT — universal, import directly into Premiere via a caption track.\n"
-                         "VTT — embeds precise X / Y position cues from your preset.",
+                "title": "📄  Export Target",
+                "body":  "Premiere → SRT or VTT, imports via caption track.\n"
+                         "Resolve → ASS format, carries your full preset:\n"
+                         "font, colour, outline, shadow and position all embedded.",
             },
             {
                 "w":     lambda: a._btn,

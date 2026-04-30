@@ -1,10 +1,3 @@
-"""
-theme.py — colour palette, font tuples, and a handful of shared UI constants.
-
-Keeping everything here means a single import gives you the full design system.
-Change something once and it updates everywhere.
-"""
-
 # ── colour palette ────────────────────────────────────────────────────────────
 
 BG       = "#0f0f0f"

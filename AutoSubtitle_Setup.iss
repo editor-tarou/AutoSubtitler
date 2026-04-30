@@ -12,7 +12,7 @@
 
 #define BuildDir     "dist\AutoSubtitle"
 #define AppName      "AutoSubtitle"
-#define AppVersion   "1.0.0"
+#define AppVersion   "1.1.1"
 #define AppPublisher "Kormany (EditorTarou) Robert Karoly"
 #define AppExe       "AutoSubtitle.exe"
 

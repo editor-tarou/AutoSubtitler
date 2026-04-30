@@ -1,10 +1,3 @@
-"""
-splash.py — the startup splash screen shown while fonts and presets load.
-
-Designed to display an animated progress bar so there's something to look
-at during the ~0.5 s of setup work before the main window appears.
-"""
-
 import tkinter as tk
 
 from .paths  import AUTHOR
@@ -61,6 +54,7 @@ class SplashScreen(tk.Toplevel):
         self._progress = 0.0
         self._target   = 0.0
         self._anim_id  = None
+        self._closed   = False   # guard against after() firing post-destroy
 
         tk.Frame(body, bg=BG, height=16).pack()
         tk.Label(body, text=AUTHOR, font=FXSM, bg=BG, fg=MUTED2).pack(anchor="w")
@@ -78,23 +72,36 @@ class SplashScreen(tk.Toplevel):
         self._step()
 
     def close(self) -> None:
+        self._closed = True          # must set BEFORE cancel so any in-flight _step exits
         if self._anim_id:
             self.after_cancel(self._anim_id)
+            self._anim_id = None
         self.destroy()
 
     # ── animation internals ───────────────────────────────────────────────────
 
     def _step(self) -> None:
+        if self._closed:
+            return
         if self._progress < self._target:
             self._progress = min(self._progress + 0.018, self._target)
             self._draw_bar()
-            self._anim_id = self.after(16, self._step)
+            # only schedule the next frame if we haven't been closed
+            if not self._closed:
+                self._anim_id = self.after(16, self._step)
         else:
-            self.update()
+            self.update_idletasks()
 
     def _draw_bar(self) -> None:
-        self._pb.update_idletasks()
-        w = self._pb.winfo_width()
-        if w > 1:
-            self._pb.coords(self._bar, 0, 0, int(w * self._progress), 4)
-        self.update()
+        # Never call self.update() here — it re-enters the event loop and lets
+        # close() fire mid-animation, leaving a dangling after() callback that
+        # then tries to draw on a destroyed canvas (the original crash).
+        if self._closed:
+            return
+        try:
+            w = self._pb.winfo_width()
+            if w > 1:
+                self._pb.coords(self._bar, 0, 0, int(w * self._progress), 4)
+            self._pb.update_idletasks()
+        except tk.TclError:
+            pass   # window was destroyed between the guard check and here — safe to ignore

@@ -1,6 +1,4 @@
 """
-preset_editor.py — the modal dialog for creating and editing caption presets.
-
 Split into two tabs: Style (typography + colour + live 16:9 preview) and
 Position (screen grid, fine-tune offsets, alignment, safe zone).
 

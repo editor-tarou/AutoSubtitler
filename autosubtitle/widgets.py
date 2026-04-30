@@ -1,16 +1,3 @@
-"""
-widgets.py — reusable Tkinter widget helpers shared across the app.
-
-ScrollFrame: a frame with an embedded canvas + scrollbar so its content
-    can overflow without touching the window size.
-
-Standalone helper functions (style_optionmenu, pill_toggle, etc.) are used
-by both the main App window and the PresetEditor dialog.
-
-Some of these helpers are slightly redundant with each other but I'd rather
-have explicit copies than one mega-function with 8 parameters.
-"""
-
 import tkinter as tk
 from tkinter import colorchooser, font as tkfont
 
